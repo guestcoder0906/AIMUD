@@ -85,18 +85,31 @@ export class FileSystem {
   }
 
   findFileByReference(ref: string): string | null {
+    const normalizedRef = ref.toLowerCase().trim();
+    
+    // 1. Exact match
     if (this.exists(ref)) return ref;
     if (this.exists(ref + '.txt')) return ref + '.txt';
     
-    // Try to find by display name
+    // 2. Match by display name (case-insensitive)
     for (const [filename, meta] of Object.entries(this.metadata)) {
-      if (meta.displayName === ref) return filename;
+      if (meta.displayName.toLowerCase().trim() === normalizedRef) return filename;
     }
     
-    // Try partial match
-    const refLower = ref.toLowerCase();
+    // 3. Match by filename without extension
     for (const filename of Object.keys(this.files)) {
-      if (filename.toLowerCase().includes(refLower)) return filename;
+      const nameOnly = filename.replace(/\.txt$/, '').toLowerCase().replace(/_/g, ' ');
+      if (nameOnly === normalizedRef) return filename;
+    }
+
+    // 4. Partial match on display name
+    for (const [filename, meta] of Object.entries(this.metadata)) {
+      if (meta.displayName.toLowerCase().includes(normalizedRef)) return filename;
+    }
+
+    // 5. Partial match on filename
+    for (const filename of Object.keys(this.files)) {
+      if (filename.toLowerCase().includes(normalizedRef)) return filename;
     }
     
     return null;

@@ -4,59 +4,33 @@ import { AIResponse, CheckDef } from "../types";
 
 const SYSTEM_PROMPT = `You are the backend engine for an AI-MUD system. Your role is to:
 
-1. Create and manage text files as the source of truth
-2. Generate world content on-demand based on player perception
-3. Verify actions against World Rules and Player stats
-4. Calculate time costs and update global time
-5. Manage status effects with expiration timestamps
-6. Track unique object instances
-7. Use hide[...] syntax for information not yet revealed to player
-8. Update files dynamically and accurately
-9. NEVER forget to create/update files for NPCs, items, locations, or any entities that appear
+1. Create and manage text files as the source of truth. Every entity mentioned in narrative [References] MUST have a corresponding file created or updated in the 'files' object.
+2. Generate world content on-demand based on player perception.
+3. Verify actions against World Rules and Player stats.
+4. Calculate time costs and update global time.
+5. Manage status effects with expiration timestamps.
+6. Track unique object instances.
+7. Use hide[...] syntax for information not yet revealed to player.
+8. Update files dynamically and accurately.
+9. MANDATORY: Every single [Reference] mentioned in your 'narrative' MUST have a corresponding entry in the 'files' object if it is new or updated. If you mention a person, place, or item for the first time, you MUST create a .txt file for it in the same response.
 
 CRITICAL FILE MANAGEMENT RULES:
-- Create a "Guide.txt" file that references these instructions and acts as the internal operating manual
-- Create "WorldRules.txt" defining physics, magic, tech, logic, time costs, and encumbrance effects
-- Create "Player.txt" with DYNAMIC attributes specific to the character (health, energy, body parts relevant to their form, inventory, knowledge, etc.)
-  * For a dog: nose sensitivity, tail status, paw health, etc.
-  * For a human: hands, legs, stamina, etc.
-  * For a robot: battery, circuits, sensors, etc.
-  * NEVER use generic attributes that don't match the entity's nature
-- Create "WorldTime.txt" with ACTUAL date/time/year appropriate for the world setting
-  * Future setting: year 2076+
-  * WW2 setting: 1940s
-  * Medieval: appropriate historical year
-  * Format: "HH:MM:SS AM/PM - Mon DD, YYYY"
-- Create files for EVERY entity that appears: NPCs (including background NPCs like guards, townsfolk, crowds), items, locations
-  * "KingsGuard_1.txt" gets displayName: "King's Guard"
-  * "TownsPerson_5.txt" gets displayName: "John" (or their actual name)
-- Use hide[...] for secrets/traps/hidden info in files - this content is completely hidden from player view
-- Track unique instances: [ObjectType_ID(status)]
-- Status effects: [Status:Type_ID(Expires: TIME)]
-- Apply encumbrance effects realistically when inventory weight matters
+- Create a "Guide.txt" file that references these instructions and acts as the internal operating manual.
+- Create "WorldRules.txt" defining physics, magic, tech, logic, time costs, and encumbrance effects.
+- Create "Player.txt" with DYNAMIC attributes specific to the character.
+- Create "WorldTime.txt" with ACTUAL date/time/year appropriate for the world setting.
+- Create files for EVERY entity that appears: NPCs, items, locations.
+- Use hide[...] for secrets/traps/hidden info in files.
+- Track unique instances: [ObjectType_ID(status)].
+- Status effects: [Status:Type_ID(Expires: TIME)].
 
 FILE REFERENCE SYNTAX:
-Use [DisplayName] or [FileName] in narrative text - these become clickable links to files
-Examples: [Player], [King's Guard], [Iron Sword], [Old Church]
+Use [DisplayName] or [FileName] in narrative text - these become clickable links to files.
 
 TIME SYSTEM:
-- WorldTime.txt contains the CURRENT time/date/year, not elapsed time
-- Calculate action duration and ADD to current time
-- Update WorldTime.txt with new current time after each action
-- Check and expire status effects against current time
-
-UPDATE VALUES:
-- Health changes: negative for damage, positive for healing
-- Energy: negative when spent, positive for restored
-- Time: always show the time cost in seconds (e.g., "+30s" for 30 second action)
-- Inventory: "+1" when adding, "-1" when removing
-
-CRITICAL: Before EVERY action, check:
-1. Does this entity have a file? If not, CREATE it immediately
-2. Is the Player.txt accurate for this specific character type?
-3. Are status effects expired based on current WorldTime?
-4. Does this action respect WorldRules physics/magic/tech?
-5. Does player have required stats/items/energy?
+- WorldTime.txt contains the CURRENT time/date/year.
+- Calculate action duration and ADD to current time.
+- Update WorldTime.txt with new current time after each action.
 
 RESPONSE FORMAT:
 Respond with JSON only:
@@ -74,17 +48,14 @@ Respond with JSON only:
   "checks": [] 
 }
 
-If probability checks are required, return empty narrative and fill the "checks" array.
-Set gameOver to true ONLY when player health/critical stat reaches 0.
-For starting prompt, create initial world files with appropriate time/year and set the scene.`;
+If probability checks are required, return empty narrative and fill the "checks" array. You can still provide initial file updates in this step if needed.
+Set gameOver to true ONLY when player health/critical stat reaches 0.`;
 
 export class AIEngine {
   private fs: FileSystem;
-  private ai: GoogleGenAI;
 
   constructor(fileSystem: FileSystem) {
     this.fs = fileSystem;
-    this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
   }
 
   async initialize(startingPrompt: string): Promise<AIResponse | null> {
@@ -104,7 +75,7 @@ export class AIEngine {
         .map(([name, content]) => `=== ${name} ===\n${content}`)
         .join('\n\n');
 
-      const prompt = `Current files:\n${context}\n\nPlayer action: ${action}\n\nProcess this action. If it requires rolls (probability/skill/luck), return "checks". If not, return "narrative" and updates.`;
+      const prompt = `Current files:\n${context}\n\nPlayer action: ${action}\n\nProcess this action. If it requires rolls (probability/skill/luck), return "checks". If not, return "narrative" and updates. Ensure all referenced entities have files.`;
 
       return await this.handleRequest(prompt);
     } catch (e) {
@@ -114,26 +85,37 @@ export class AIEngine {
   }
 
   private async handleRequest(userPrompt: string): Promise<AIResponse | null> {
+    const finalResponse: AIResponse = {
+      narrative: "",
+      updates: [],
+      files: {},
+      gameOver: false
+    };
+
+    const processStep = (stepData: AIResponse) => {
+      if (stepData.narrative) finalResponse.narrative = stepData.narrative;
+      if (stepData.updates) {
+        finalResponse.updates = [...(finalResponse.updates || []), ...stepData.updates];
+      }
+      if (stepData.files) {
+        finalResponse.files = { ...finalResponse.files, ...stepData.files };
+        // Write to filesystem immediately so it's ready for the next step or for the UI
+        this.processResponseData(stepData);
+      }
+      if (stepData.gameOver) finalResponse.gameOver = true;
+    };
+
     // Phase 1: Analyze/Execute
     let responseText = await this.callAI(userPrompt);
     let data: AIResponse;
 
     try {
-      data = JSON.parse(responseText);
+      data = this.parseAIResponse(responseText);
     } catch (e) {
-      console.error("JSON Parse Error", e, responseText);
-      // Attempt to clean markdown json blocks if present
-      const match = responseText.match(/```json([\s\S]*?)```/);
-      if (match) {
-        try {
-          data = JSON.parse(match[1]);
-        } catch (e2) {
-           return { narrative: "System Error: AI returned invalid JSON." };
-        }
-      } else {
-        return { narrative: "System Error: AI returned invalid format." };
-      }
+      return { narrative: "System Error: AI returned invalid format." };
     }
+
+    processStep(data);
 
     // Phase 2: If checks are required
     if (data.checks && Array.isArray(data.checks) && data.checks.length > 0) {
@@ -153,22 +135,29 @@ export class AIEngine {
         `Check: ${r.name}\nReason: ${r.description}\nRoll: ${r.roll} / 1000\nThresholds: ${JSON.stringify(r.thresholds)}\nRESULT: ${r.outcome}`
       ).join('\n\n');
 
-      const followUpPrompt = `PREVIOUS CONTEXT: ${userPrompt}\n\n[SYSTEM: Probability Checks Completed]\n\n${resultReport}\n\nBased on these FAIR and FINAL results, generate the narrative and file updates. Include the Check Name and Result (e.g. "[Jump: Failure]") in the narrative, but do NOT state the raw roll numbers.`;
+      const followUpPrompt = `PREVIOUS CONTEXT: ${userPrompt}\n\n[SYSTEM: Probability Checks Completed]\n\n${resultReport}\n\nBased on these FAIR and FINAL results, generate the narrative and file updates. Include the Check Name and Result (e.g. "[Jump: Failure]") in the narrative. IMPORTANT: Ensure ALL entities mentioned in your narrative have their files created or updated in the 'files' object.`;
 
-      // We make a fresh call with the context combined, as we don't maintain a full chat history object here 
-      // (The FS is the history source of truth).
-      responseText = await this.callAI(followUpPrompt);
+      const secondResponseText = await this.callAI(followUpPrompt);
       try {
-        const match = responseText.match(/```json([\s\S]*?)```/);
-        data = match ? JSON.parse(match[1]) : JSON.parse(responseText);
+        const secondData = this.parseAIResponse(secondResponseText);
+        processStep(secondData);
       } catch (e) {
         console.error("JSON Parse Error Phase 2", e);
-        return { narrative: "Error processing check results." };
+        return { ...finalResponse, narrative: finalResponse.narrative + "\n[Error processing check results.]" };
       }
     }
 
-    this.processResponseData(data);
-    return data;
+    return finalResponse;
+  }
+
+  private parseAIResponse(text: string): AIResponse {
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      const match = text.match(/```json([\s\S]*?)```/);
+      if (match) return JSON.parse(match[1]);
+      throw new Error("Invalid JSON format");
+    }
   }
 
   private determineOutcome(roll: number, thresholds: { [outcome: string]: number }): string {
@@ -182,22 +171,20 @@ export class AIEngine {
   }
 
   private processResponseData(data: AIResponse) {
-    if (!data) return;
-    
-    if (data.files) {
-      for (const [filename, fileData] of Object.entries(data.files)) {
-        if (typeof fileData === 'string') {
-          this.fs.write(filename, fileData);
-        } else if (fileData && fileData.content) {
-          this.fs.write(filename, fileData.content, fileData.displayName);
-        }
+    if (!data || !data.files) return;
+    for (const [filename, fileData] of Object.entries(data.files)) {
+      if (typeof fileData === 'string') {
+        this.fs.write(filename, fileData);
+      } else if (fileData && fileData.content) {
+        this.fs.write(filename, fileData.content, fileData.displayName);
       }
     }
   }
 
   private async callAI(prompt: string): Promise<string> {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     try {
-      const response = await this.ai.models.generateContent({
+      const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: prompt,
         config: {
@@ -206,7 +193,6 @@ export class AIEngine {
           temperature: 0.7,
         }
       });
-
       return response.text || "{}";
     } catch (e) {
       console.error("Gemini API Call Failed", e);
